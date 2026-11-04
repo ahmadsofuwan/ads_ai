@@ -1,37 +1,22 @@
-name: Auto Deploy via SSH to Server
+name: Auto Deploy Ads AI
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   deploy:
-    name: SSH Auto-Deploy to Server
+    name: Executing remote SSH commands
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Run SQLite Automated Tests (CI)
-        run: |
-          cp .env.example .env
-          php artisan key:generate
-          touch database/database.sqlite
-          DB_CONNECTION=sqlite php artisan migrate --force
-          DB_CONNECTION=sqlite php artisan test
-
-      - name: Deploy to Server via SSH
+      - name: Executing remote SSH commands
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          port: ${{ secrets.SSH_PORT }}
+          host: 103.155.193.161
+          username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script_stop: true
+          port: 2222
           script: |
             cd /root/agy/metaads-ai-publisher
-            chmod +x deploy.sh
             ./deploy.sh main
