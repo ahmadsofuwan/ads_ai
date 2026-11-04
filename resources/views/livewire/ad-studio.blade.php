@@ -185,6 +185,31 @@
                                   class="w-full rounded-lg border-slate-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs text-slate-700 dark:text-zinc-200"></textarea>
                     </div>
                 @endif
+
+                <!-- Quick AI Media Editor (Video / Image / Image-to-Video) -->
+                <div class="p-3 rounded-xl bg-slate-50 dark:bg-zinc-800/60 border border-slate-200 dark:border-zinc-700/80 space-y-2">
+                    <div class="flex items-center justify-between">
+                        <span class="text-[11px] font-bold text-slate-800 dark:text-zinc-200">
+                            🪄 Edit Video/Gambar dengan Perintah AI
+                        </span>
+                        <a href="{{ route('media.index') }}" class="text-[10px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">
+                            Editor Lengkap →
+                        </a>
+                    </div>
+                    <div class="flex gap-1.5">
+                        <input type="text"
+                               wire:model="quickEditPrompt"
+                               placeholder="Contoh: Ubah 9:16 TikTok + banner merah: PROMO WIFI 100RB / Jadikan video MP4"
+                               class="flex-1 rounded-lg border-slate-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs px-2.5 py-1.5" />
+                        <button type="button"
+                                wire:click="quickAiEditCurrentMedia"
+                                wire:loading.attr="disabled"
+                                class="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold whitespace-nowrap transition">
+                            <span wire:loading.remove wire:target="quickAiEditCurrentMedia">🪄 Edit AI</span>
+                            <span wire:loading wire:target="quickAiEditCurrentMedia">⏳...</span>
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
 

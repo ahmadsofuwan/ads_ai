@@ -10,6 +10,7 @@ use App\Models\AdDraft;
 use App\Models\AiProvider;
 use App\Models\MediaAsset;
 use App\Models\Setting;
+use App\Services\MediaEditorService;
 use App\Services\MediaVisionService;
 use App\Services\MetaMarketingService;
 use App\Services\OpenRouterService;
@@ -30,6 +31,7 @@ class AdStudio extends Component
     public string $existingVideoPath = '';
     public ?int $selectedMediaAssetId = null;
     public string $aiVisualAnalysis = '';
+    public string $quickEditPrompt = '';
     public array $availableVideos = [];
 
     public string $rawUserPrompt = 'Promo pasang WiFi rumah cepat tanpa batas kuota, radius 10km, umur 24-45 tahun, budget 50rb/hari arahkan ke WA.';
@@ -235,6 +237,51 @@ class AdStudio extends Component
         } catch (\Throwable $e) {
             $this->statusType = 'error';
             $this->statusMessage = 'Gagal menganalisa visual media: ' . $e->getMessage();
+        }
+    }
+
+    public function quickAiEditCurrentMedia(
+        OpenRouterService $openRouterService,
+        MediaVisionService $visionService,
+        MediaEditorService $editorService
+    ): void {
+        $asset = $this->selectedMediaAssetId
+            ? MediaAsset::find($this->selectedMediaAssetId)
+            : ($this->existingVideoPath ? $visionService->resolveOrCreateAssetFromPath($this->existingVideoPath) : null);
+
+        if (! $asset && $this->videoFile) {
+            $asset = $visionService->storeUploadedMedia($this->videoFile);
+        }
+
+        if (! $asset) {
+            $this->statusType = 'error';
+            $this->statusMessage = 'Pilih atau unggah file Video/Gambar terlebih dahulu di Langkah 1 sebelum menggunakan AI Media Editor.';
+
+            return;
+        }
+
+        try {
+            $editOptions = $openRouterService->parseMediaEditPrompt(
+                $asset,
+                $this->quickEditPrompt,
+                null,
+                $this->selectedAiProviderId
+            );
+
+            $editedAsset = $editorService->editMediaAsset($asset, $editOptions);
+
+            $this->videoFile = null;
+            $this->selectedMediaAssetId = $editedAsset->id;
+            $this->existingVideoPath = $editedAsset->file_path;
+            $this->aiVisualAnalysis = (string) ($editedAsset->ai_visual_analysis ?? '');
+            $this->quickEditPrompt = '';
+            $this->loadAvailableVideos();
+
+            $this->statusType = 'success';
+            $this->statusMessage = "🪄 AI berhasil mengedit media menjadi \"{$editedAsset->title}\" ({$editedAsset->media_type} • {$editedAsset->width}x{$editedAsset->height}px) dan memilihnya untuk kampanye ini!";
+        } catch (\Throwable $e) {
+            $this->statusType = 'error';
+            $this->statusMessage = 'Gagal mengedit media dengan AI: ' . $e->getMessage();
         }
     }
 

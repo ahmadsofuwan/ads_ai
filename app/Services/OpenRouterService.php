@@ -534,6 +534,220 @@ PROMPT;
     }
 
     /**
+     * Parse a natural language editing prompt (combined with Multimodal AI Vision of the MediaAsset)
+     * into structured video/image editing instructions for MediaEditorService.
+     *
+     * @return array<string, mixed>
+     */
+    public function parseMediaEditPrompt(
+        MediaAsset $asset,
+        string $editPrompt = '',
+        ?Setting $setting = null,
+        ?int $preferredAiProviderId = null
+    ): array {
+        $setting = $setting ?? Setting::current();
+        $heuristics = $this->extractHeuristicMediaEditOptions($asset, $editPrompt);
+        $configs = $this->resolveActiveAiConfigs($setting, $preferredAiProviderId);
+
+        if (empty($configs)) {
+            return $heuristics;
+        }
+
+        $visionService = app(MediaVisionService::class);
+        $visionUris = $visionService->buildVisionDataUris(null, $asset);
+
+        $systemPrompt = <<<'PROMPT'
+Anda adalah AI Creative Video & Image Editor untuk iklan digital (Meta Ads, TikTok Ads, YouTube Shorts).
+Tugas Anda adalah melihat gambar/frame video terlampir dan menerjemahkan instruksi edit dari pengguna menjadi JSON konfigurasi editing visual yang siap dieksekusi oleh FFmpeg & GD Engine.
+
+ATURAN OUTPUT JSON:
+1. `output_mode`: `"KEEP_TYPE"` (tetap sesuai tipe asli) atau `"IMAGE_TO_VIDEO"` (jika sumbernya IMAGE dan pengguna meminta diubah jadi video MP4 / Reels / TikTok).
+2. `aspect_ratio`: `"9:16"` (Vertikal TikTok/Reels/Shorts), `"1:1"` (Square Feed), `"4:5"` (Portrait Feed), `"16:9"` (Landscape YouTube), atau `"ORIGINAL"`.
+3. `fit_mode`: `"CROP"` (potong penuh layar) atau `"PAD"` (tampilkan utuh dengan latar belakang gelap).
+4. `color_preset`: `"NONE"`, `"VIBRANT"` (warna tajam mencolok), `"BRIGHT"` (lebih terang), `"WARM"` (hangat), atau `"CINEMATIC"` (kontras tinggi).
+5. `overlay_text`: Teks Headline Hook Promo singkat yang akan ditempel di atas video/gambar (maksimal 42 karakter, huruf Latin tanpa emoji, contoh: "PROMO WIFI CEPAT 100RB/BLN").
+6. `overlay_subtext`: Teks pendukung CTA di bawah headline (maksimal 50 karakter tanpa emoji, contoh: "Gratis Instalasi Hari Ini - Hubungi WA!").
+7. `overlay_position`: `"TOP"`, `"CENTER"`, atau `"BOTTOM"`.
+8. `overlay_theme`: `"RED"`, `"INDIGO"`, `"EMERALD"`, `"AMBER"`, atau `"DARK"`.
+9. `trim_start`: Angka detik mulai potong video (default `0`).
+10. `trim_duration`: Durasi potong video dalam detik (`0` jika tidak dipotong).
+11. `speed`: Kecepatan video antara `0.8` sampai `1.5` (default `1.0`).
+12. `video_duration`: Durasi video dalam detik (`4` sampai `15`, default `8`) khusus jika `output_mode` = `"IMAGE_TO_VIDEO"`.
+13. `new_title`: Judul baru untuk hasil edit media.
+14. `ai_edit_summary`: Penjelasan singkat 1-2 kalimat tentang perubahan visual yang diterapkan AI.
+
+Balas HANYA dengan JSON valid tanpa markdown tambahan.
+PROMPT;
+
+        $userText = "Aset Media: {$asset->title} (Tipe: {$asset->media_type})\n"
+            . ($asset->notes ? "Catatan Media: {$asset->notes}\n" : '')
+            . ($asset->ai_visual_analysis ? "Analisa Visual: {$asset->ai_visual_analysis}\n" : '')
+            . "Instruksi Edit dari Pengguna: \"" . ($editPrompt !== '' ? $editPrompt : 'Buatkan tampilan iklan paling menarik dengan Hook Banner Promo yang menjual sesuai isi visual') . '"';
+
+        $userContent = $userText;
+        if (! empty($visionUris)) {
+            $userContent = [
+                ['type' => 'text', 'text' => $userText],
+            ];
+            foreach ($visionUris as $uri) {
+                $userContent[] = [
+                    'type' => 'image_url',
+                    'image_url' => ['url' => $uri],
+                ];
+            }
+        }
+
+        foreach ($configs as $cfg) {
+            try {
+                $headers = [
+                    'Authorization' => 'Bearer ' . $cfg['api_key'],
+                    'HTTP-Referer' => config('app.url', 'http://localhost:8000'),
+                    'X-Title' => config('app.name', 'MetaAds AI Publisher'),
+                    'Content-Type' => 'application/json',
+                ];
+
+                $payload = [
+                    'model' => $cfg['model'],
+                    'messages' => [
+                        ['role' => 'system', 'content' => $systemPrompt],
+                        ['role' => 'user', 'content' => $userContent],
+                    ],
+                    'temperature' => 0.4,
+                ];
+
+                $response = Http::withHeaders($headers)->timeout(45)->post($cfg['endpoint'], $payload);
+
+                if (! $response->successful() && is_array($userContent)) {
+                    $payload['messages'][1]['content'] = $userText;
+                    $response = Http::withHeaders($headers)->timeout(45)->post($cfg['endpoint'], $payload);
+                }
+
+                if ($response->successful()) {
+                    $raw = (string) ($response->json('choices.0.message.content') ?? '');
+                    $decoded = $this->decodeJsonFromContent($raw);
+                    if (is_array($decoded)) {
+                        return array_merge($heuristics, array_filter($decoded, fn ($v) => $v !== null && $v !== ''));
+                    }
+                }
+            } catch (\Throwable $e) {
+                Log::warning("Gagal parse prompt edit media via {$cfg['provider']}: " . $e->getMessage());
+            }
+        }
+
+        return $heuristics;
+    }
+
+    /**
+     * Heuristic parser for natural language media editing instructions (works offline or as baseline).
+     *
+     * @return array<string, mixed>
+     */
+    public function extractHeuristicMediaEditOptions(MediaAsset $asset, string $prompt = ''): array
+    {
+        $lower = mb_strtolower($prompt);
+
+        $outputMode = 'KEEP_TYPE';
+        if ($asset->isImage() && preg_match('/\b(jadi\s*video|ubah\s*ke\s*video|mp4|animasi|image\s*to\s*video|tiktok|reels|shorts)\b/i', $prompt)) {
+            $outputMode = 'IMAGE_TO_VIDEO';
+        }
+
+        $aspectRatio = '9:16';
+        if (preg_match('/\b(1:1|kotak|square|feed)\b/i', $prompt)) {
+            $aspectRatio = '1:1';
+        } elseif (preg_match('/\b(4:5|portrait)\b/i', $prompt)) {
+            $aspectRatio = '4:5';
+        } elseif (preg_match('/\b(16:9|landscape|horizontal|youtube)\b/i', $prompt)) {
+            $aspectRatio = '16:9';
+        } elseif (preg_match('/\b(original|asli|tetap)\b/i', $prompt)) {
+            $aspectRatio = 'ORIGINAL';
+        }
+
+        $fitMode = preg_match('/\b(pad|utuh|jangan\s*potong|full|letterbox)\b/i', $prompt) ? 'PAD' : 'CROP';
+
+        $colorPreset = 'VIBRANT';
+        if (preg_match('/\b(cerah|terang|bright)\b/i', $prompt)) {
+            $colorPreset = 'BRIGHT';
+        } elseif (preg_match('/\b(warm|hangat|emas)\b/i', $prompt)) {
+            $colorPreset = 'WARM';
+        } elseif (preg_match('/\b(cinematic|sinematik|kontras)\b/i', $prompt)) {
+            $colorPreset = 'CINEMATIC';
+        } elseif (preg_match('/\b(tanpa\s*filter|normal|none)\b/i', $prompt)) {
+            $colorPreset = 'NONE';
+        }
+
+        $overlayPos = 'TOP';
+        if (preg_match('/\b(bawah|bottom)\b/i', $prompt)) {
+            $overlayPos = 'BOTTOM';
+        } elseif (preg_match('/\b(tengah|center)\b/i', $prompt)) {
+            $overlayPos = 'CENTER';
+        }
+
+        $overlayTheme = 'RED';
+        if (preg_match('/\b(hijau|wa|whatsapp|emerald)\b/i', $prompt)) {
+            $overlayTheme = 'EMERALD';
+        } elseif (preg_match('/\b(biru|ungu|indigo)\b/i', $prompt)) {
+            $overlayTheme = 'INDIGO';
+        } elseif (preg_match('/\b(kuning|emas|gold|amber)\b/i', $prompt)) {
+            $overlayTheme = 'AMBER';
+        } elseif (preg_match('/\b(hitam|gelap|dark)\b/i', $prompt)) {
+            $overlayTheme = 'DARK';
+        }
+
+        $overlayText = '';
+        if (preg_match('/"([^"]{3,60})"/u', $prompt, $m)) {
+            $overlayText = trim($m[1]);
+        } elseif (preg_match("/'([^']{3,60})'/u", $prompt, $m)) {
+            $overlayText = trim($m[1]);
+        } elseif (preg_match('/(?:tulisan|teks|banner|headline|judul)\s*[:=]\s*([^\n,.]+)/iu', $prompt, $m)) {
+            $overlayText = trim($m[1]);
+        } else {
+            $overlayText = Str::limit(mb_strtoupper($asset->title), 36, '');
+        }
+
+        $overlaySubtext = 'Gratis Konsultasi & Promo Hari Ini - Klik Sekarang!';
+        if (preg_match('/(?:subteks|sub|cta)\s*[:=]\s*([^\n,.]+)/iu', $prompt, $m)) {
+            $overlaySubtext = trim($m[1]);
+        } elseif (! empty($asset->notes)) {
+            $overlaySubtext = Str::limit(trim($asset->notes), 48, '');
+        }
+
+        $trimStart = 0.0;
+        $trimDuration = 0.0;
+        if (preg_match('/\b(\d{1,2})\s*detik\b/i', $prompt, $m)) {
+            $sec = (int) $m[1];
+            if ($sec >= 3 && $sec <= 60) {
+                $trimDuration = (float) $sec;
+            }
+        }
+
+        $speed = 1.0;
+        if (preg_match('/\b(1\.[1-5]\d?)\s*x\b/i', $prompt, $m)) {
+            $speed = (float) $m[1];
+        } elseif (preg_match('/\b(percepat|cepat)\b/i', $lower)) {
+            $speed = 1.15;
+        }
+
+        $videoDuration = $trimDuration >= 4 && $trimDuration <= 15 ? (int) $trimDuration : 8;
+
+        return [
+            'output_mode' => $outputMode,
+            'aspect_ratio' => $aspectRatio,
+            'fit_mode' => $fitMode,
+            'color_preset' => $colorPreset,
+            'overlay_text' => Str::limit($overlayText, 42, ''),
+            'overlay_subtext' => Str::limit($overlaySubtext, 50, ''),
+            'overlay_position' => $overlayPos,
+            'overlay_theme' => $overlayTheme,
+            'trim_start' => $trimStart,
+            'trim_duration' => $trimDuration,
+            'speed' => $speed,
+            'video_duration' => $videoDuration,
+            'new_title' => $asset->title . ' (AI Edited ' . $aspectRatio . ')',
+            'ai_edit_summary' => "Format {$aspectRatio} ({$fitMode}), Filter {$colorPreset}, Banner {$overlayPos} ({$overlayTheme}): \"{$overlayText}\"",
+        ];
+    }
+
+    /**
      * Regenerate persuasive copywriting variation for an existing AdDraft across Meta, TikTok & Google.
      *
      * @return array<string, string>

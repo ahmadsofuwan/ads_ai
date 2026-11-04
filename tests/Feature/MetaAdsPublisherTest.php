@@ -11,6 +11,7 @@ use App\Models\AiProvider;
 use App\Models\MediaAsset;
 use App\Models\Setting;
 use App\Services\GoogleAdsService;
+use App\Services\MediaEditorService;
 use App\Services\MediaVisionService;
 use App\Services\MetaMarketingService;
 use App\Services\OpenRouterService;
@@ -545,5 +546,54 @@ class MetaAdsPublisherTest extends TestCase
         $this->assertSame(75000, $result['daily_budget']);
         $this->assertSame(15, $result['radius_km']);
         $this->assertNotNull($fallbackOpenAi->id);
+    }
+
+    public function test_ai_media_editor_edits_image_video_and_converts_image_to_video(): void
+    {
+        Storage::fake('public');
+
+        $pngBytes = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=');
+        Storage::disk('public')->put('ads_media/poster_source.png', $pngBytes);
+
+        $sourceImage = MediaAsset::create([
+            'title' => 'Poster Promo FTTH',
+            'file_name' => 'poster_source.png',
+            'file_path' => 'ads_media/poster_source.png',
+            'media_type' => MediaAsset::TYPE_IMAGE,
+            'mime_type' => 'image/png',
+            'file_size' => strlen($pngBytes),
+            'notes' => 'Gratis Instalasi Hari Ini',
+        ]);
+
+        $openRouter = app(OpenRouterService::class);
+        $editor = app(MediaEditorService::class);
+
+        // 1. Parse natural language edit prompt for 9:16 image with red banner
+        $parsedImgOpts = $openRouter->parseMediaEditPrompt(
+            $sourceImage,
+            'Ubah ke ukuran vertikal 9:16 warna cerah dan pasang banner merah di atas: "PROMO WIFI 100RB/BLN"'
+        );
+
+        $this->assertSame('9:16', $parsedImgOpts['aspect_ratio']);
+        $this->assertSame('BRIGHT', $parsedImgOpts['color_preset']);
+        $this->assertSame('PROMO WIFI 100RB/BLN', $parsedImgOpts['overlay_text']);
+
+        $editedImage = $editor->editMediaAsset($sourceImage, $parsedImgOpts);
+        $this->assertTrue($editedImage->isImage());
+        $this->assertSame(1080, $editedImage->width);
+        $this->assertSame(1920, $editedImage->height);
+        Storage::disk('public')->assertExists($editedImage->file_path);
+
+        // 2. Convert Image to Video MP4 Ad (IMAGE_TO_VIDEO)
+        $parsedI2V = $openRouter->parseMediaEditPrompt(
+            $sourceImage,
+            'Ubah gambar ini jadi video mp4 9:16 durasi 6 detik untuk TikTok dengan tulisan: "PASANG WIFI SEKARANG"'
+        );
+        $this->assertSame('IMAGE_TO_VIDEO', $parsedI2V['output_mode']);
+
+        $convertedVideo = $editor->editMediaAsset($sourceImage, $parsedI2V);
+        $this->assertTrue($convertedVideo->isVideo());
+        $this->assertSame('video/mp4', $convertedVideo->mime_type);
+        Storage::disk('public')->assertExists($convertedVideo->file_path);
     }
 }
