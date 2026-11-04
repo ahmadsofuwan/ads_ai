@@ -1,0 +1,37 @@
+name: Auto Deploy via SSH to Server
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: SSH Auto-Deploy to Server
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Run SQLite Automated Tests (CI)
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+          touch database/database.sqlite
+          DB_CONNECTION=sqlite php artisan migrate --force
+          DB_CONNECTION=sqlite php artisan test
+
+      - name: Deploy to Server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          port: ${{ secrets.SSH_PORT }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script_stop: true
+          script: |
+            cd /root/agy/metaads-ai-publisher
+            chmod +x deploy.sh
+            ./deploy.sh main
