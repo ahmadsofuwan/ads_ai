@@ -51,6 +51,9 @@ class AdDraft extends Model
         'title',
         'raw_user_prompt',
         'video_local_path',
+        'media_asset_id',
+        'media_type',
+        'ai_visual_context',
         'target_platforms',
         'meta_account_id',
         'tiktok_account_id',
@@ -243,6 +246,11 @@ class AdDraft extends Model
     public function aiProvider(): BelongsTo
     {
         return $this->belongsTo(AiProvider::class, 'ai_provider_id');
+    }
+
+    public function mediaAsset(): BelongsTo
+    {
+        return $this->belongsTo(MediaAsset::class, 'media_asset_id');
     }
 
     /**

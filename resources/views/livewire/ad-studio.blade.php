@@ -86,9 +86,11 @@
                 <div class="flex items-center justify-between mb-3">
                     <h2 class="text-base font-semibold text-slate-900 dark:text-white flex items-center gap-2">
                         <span class="w-6 h-6 rounded-full bg-blue-600 text-white text-xs font-bold flex items-center justify-center">1</span>
-                        <span>Materi Video Iklan</span>
+                        <span>Materi Video / Gambar &amp; AI Vision</span>
                     </h2>
-                    <span class="text-[11px] font-mono text-slate-400">MP4 / MOV / WEBM</span>
+                    <a href="{{ route('media.index') }}" class="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">
+                        🗄️ Buka Storage Library →
+                    </a>
                 </div>
 
                 <!-- Drag and Drop Upload Box -->
@@ -99,7 +101,7 @@
                     <input x-ref="videoInput"
                            type="file"
                            wire:model="videoFile"
-                           accept="video/mp4,video/quicktime,video/webm,video/*"
+                           accept="video/mp4,video/quicktime,video/webm,image/jpeg,image/png,image/webp,video/*,image/*"
                            @change="handleFileSelect($event)"
                            class="hidden" />
 
@@ -110,52 +112,80 @@
                             </svg>
                         </div>
                         <div class="text-sm font-semibold text-slate-800 dark:text-zinc-200">
-                            Klik atau Tarik &amp; Lepas (Drag &amp; Drop) Video ke Sini
+                            Klik atau Drag &amp; Drop Video / Gambar ke Sini
                         </div>
                         <p class="text-xs text-slate-500 dark:text-zinc-400">
-                            Satu video untuk Reels/FB Feed, TikTok Video Ad, dan YouTube Shorts / Demand Gen.
+                            Otomatis disimpan ke Storage Library &amp; diekstrak frame-nya agar bisa dilihat oleh AI Vision.
                         </p>
                     </div>
 
                     <div wire:loading wire:target="videoFile" class="mt-3 text-xs font-semibold text-blue-600 dark:text-blue-400">
-                        ⏳ Mengunggah file video ke server lokal...
+                        ⏳ Menyimpan ke Storage Library &amp; mengekstrak frame visual...
                     </div>
                 </div>
 
-                <!-- Video Preview Player -->
-                <div class="mt-4">
+                <!-- Media Preview Player -->
+                <div class="mt-4 space-y-3">
                     <template x-if="videoPreviewUrl">
                         <div class="rounded-xl overflow-hidden bg-black border border-slate-200 dark:border-zinc-800">
-                            <video :src="videoPreviewUrl" controls class="w-full max-h-72 mx-auto object-contain"></video>
+                            <video :src="videoPreviewUrl" controls class="w-full max-h-64 mx-auto object-contain"></video>
                         </div>
                     </template>
 
-                    @if(!$videoFile && $existingVideoPath)
+                    @if($existingVideoPath)
                         @php
                             $existingUrl = \Illuminate\Support\Facades\Storage::disk('public')->url($existingVideoPath);
+                            $isImageExt = preg_match('/\.(jpg|jpeg|png|webp|gif)$/i', $existingVideoPath);
                         @endphp
                         <div x-show="!videoPreviewUrl" class="rounded-xl overflow-hidden bg-black border border-slate-200 dark:border-zinc-800">
-                            <video src="{{ $existingUrl }}" controls class="w-full max-h-72 mx-auto object-contain"></video>
+                            @if ($isImageExt)
+                                <img src="{{ $existingUrl }}" alt="Preview Media" class="w-full max-h-64 mx-auto object-contain" />
+                            @else
+                                <video src="{{ $existingUrl }}" controls class="w-full max-h-64 mx-auto object-contain"></video>
+                            @endif
                         </div>
                     @endif
                 </div>
             </div>
 
-            @if (count($availableVideos) > 0)
-                <div class="pt-4 border-t border-slate-200 dark:border-zinc-800">
-                    <label class="block text-xs font-medium text-slate-600 dark:text-zinc-400 mb-1.5">
-                        Atau pilih dari koleksi video yang sudah terunggah di server:
-                    </label>
-                    <select wire:model.live="existingVideoPath"
-                            @change="videoPreviewUrl = null"
-                            class="w-full rounded-xl border-slate-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs text-slate-800 dark:text-zinc-200 focus:ring-blue-500 focus:border-blue-500">
-                        <option value="">-- Pilih Video Tersimpan --</option>
-                        @foreach ($availableVideos as $vid)
-                            <option value="{{ $vid['path'] }}">{{ $vid['name'] }}</option>
-                        @endforeach
-                    </select>
+            <div class="pt-4 border-t border-slate-200 dark:border-zinc-800 space-y-3">
+                @if (count($availableVideos) > 0)
+                    <div>
+                        <label class="block text-xs font-semibold text-slate-600 dark:text-zinc-400 mb-1.5">
+                            🗄️ Pilih dari Media Storage Library (Video &amp; Gambar Tersimpan):
+                        </label>
+                        <select wire:model.live="existingVideoPath"
+                                @change="videoPreviewUrl = null"
+                                class="w-full rounded-xl border-slate-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs text-slate-800 dark:text-zinc-200 focus:ring-blue-500 focus:border-blue-500">
+                            <option value="">-- Pilih Media dari Storage Library --</option>
+                            @foreach ($availableVideos as $vid)
+                                <option value="{{ $vid['path'] }}">{{ $vid['name'] }}</option>
+                            @endforeach
+                        </select>
+                    </div>
+                @endif
+
+                <div class="flex items-center justify-between gap-2">
+                    <button type="button"
+                            wire:click="analyzeCurrentMediaWithVision"
+                            wire:loading.attr="disabled"
+                            class="w-full inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-xl bg-indigo-600/10 hover:bg-indigo-600/20 border border-indigo-500/30 text-indigo-600 dark:text-indigo-400 text-xs font-bold transition">
+                        <span wire:loading.remove wire:target="analyzeCurrentMediaWithVision">👁️ Baca &amp; Lihat Isi Video/Gambar dengan AI Vision</span>
+                        <span wire:loading wire:target="analyzeCurrentMediaWithVision">⏳ AI sedang mengamati visual media...</span>
+                    </button>
                 </div>
-            @endif
+
+                @if ($aiVisualAnalysis)
+                    <div class="p-3 rounded-xl bg-indigo-500/5 border border-indigo-500/25 space-y-1">
+                        <div class="text-[10px] font-bold uppercase text-indigo-600 dark:text-indigo-400">
+                            👁️ Hasil Penglihatan AI Vision (Otomatis disertakan ke Prompt):
+                        </div>
+                        <textarea wire:model="aiVisualAnalysis"
+                                  rows="2"
+                                  class="w-full rounded-lg border-slate-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs text-slate-700 dark:text-zinc-200"></textarea>
+                    </div>
+                @endif
+            </div>
         </div>
 
         <!-- Right Column: Leaflet.js Multi-Pin Map & Radius Sliders (7 cols) -->
@@ -407,7 +437,7 @@
                             <span class="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-zinc-300">
                                 🏢 Pilih Akun API Iklan per Platform (Mendukung Multi-Akun Sekaligus):
                             </span>
-                            <a href="{{ route('settings') }}" class="text-[11px] font-semibold text-blue-600 dark:text-blue-400 hover:underline">
+                            <a href="{{ route('settings.index') }}" class="text-[11px] font-semibold text-blue-600 dark:text-blue-400 hover:underline">
                                 + Kelola Akun API
                             </a>
                         </div>

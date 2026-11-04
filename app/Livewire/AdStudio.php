@@ -8,7 +8,9 @@ use App\Jobs\PublishTiktokAdJob;
 use App\Models\AdAccount;
 use App\Models\AdDraft;
 use App\Models\AiProvider;
+use App\Models\MediaAsset;
 use App\Models\Setting;
+use App\Services\MediaVisionService;
 use App\Services\MetaMarketingService;
 use App\Services\OpenRouterService;
 use Illuminate\Support\Facades\Storage;
@@ -26,6 +28,8 @@ class AdStudio extends Component
 
     public $videoFile = null;
     public string $existingVideoPath = '';
+    public ?int $selectedMediaAssetId = null;
+    public string $aiVisualAnalysis = '';
     public array $availableVideos = [];
 
     public string $rawUserPrompt = 'Promo pasang WiFi rumah cepat tanpa batas kuota, radius 10km, umur 24-45 tahun, budget 50rb/hari arahkan ke WA.';
@@ -132,23 +136,106 @@ class AdStudio extends Component
         }
 
         $this->loadAvailableVideos();
+
+        $reqMediaId = request()->query('media_id');
+        if ($reqMediaId) {
+            $asset = MediaAsset::find((int) $reqMediaId);
+            if ($asset) {
+                $this->selectedMediaAssetId = $asset->id;
+                $this->existingVideoPath = $asset->file_path;
+                $this->aiVisualAnalysis = (string) ($asset->ai_visual_analysis ?? '');
+            }
+        }
     }
 
     public function loadAvailableVideos(): void
     {
-        Storage::disk('public')->makeDirectory('ads_videos');
-        $files = Storage::disk('public')->files('ads_videos');
+        $visionService = app(MediaVisionService::class);
+        $visionService->syncStorageDirectory();
+
+        $assets = MediaAsset::query()->orderByDesc('created_at')->get();
         $list = [];
-        foreach ($files as $file) {
-            if (preg_match('/\.(mp4|mov|m4v|webm|avi)$/i', $file)) {
-                $list[] = [
-                    'path' => $file,
-                    'name' => basename($file),
-                    'url' => Storage::disk('public')->url($file),
-                ];
-            }
+        foreach ($assets as $asset) {
+            $list[] = [
+                'id' => $asset->id,
+                'path' => $asset->file_path,
+                'name' => "[{$asset->media_type}] {$asset->title} ({$asset->file_name})",
+                'media_type' => $asset->media_type,
+                'url' => $asset->url,
+                'frames' => $asset->frame_urls,
+                'visual_analysis' => $asset->ai_visual_analysis,
+            ];
         }
         $this->availableVideos = $list;
+    }
+
+    public function updatedVideoFile(): void
+    {
+        if (! $this->videoFile) {
+            return;
+        }
+
+        try {
+            $asset = app(MediaVisionService::class)->storeUploadedMedia($this->videoFile);
+            $this->selectedMediaAssetId = $asset->id;
+            $this->existingVideoPath = $asset->file_path;
+            $this->aiVisualAnalysis = (string) ($asset->ai_visual_analysis ?? '');
+            $this->loadAvailableVideos();
+
+            $this->statusType = 'success';
+            $this->statusMessage = "💾 Media \"{$asset->title}\" ({$asset->media_type}) otomatis tersimpan ke Storage Library & siap dibaca AI Vision!";
+        } catch (\Throwable $e) {
+            // Keep standard fallback in saveDraft if immediate storage fails
+        }
+    }
+
+    public function updatedExistingVideoPath(string $path): void
+    {
+        if ($path === '') {
+            $this->selectedMediaAssetId = null;
+            $this->aiVisualAnalysis = '';
+
+            return;
+        }
+
+        $asset = app(MediaVisionService::class)->resolveOrCreateAssetFromPath($path);
+        if ($asset) {
+            $this->selectedMediaAssetId = $asset->id;
+            $this->aiVisualAnalysis = (string) ($asset->ai_visual_analysis ?? '');
+        }
+    }
+
+    public function analyzeCurrentMediaWithVision(OpenRouterService $openRouterService, MediaVisionService $visionService): void
+    {
+        $asset = $this->selectedMediaAssetId
+            ? MediaAsset::find($this->selectedMediaAssetId)
+            : ($this->existingVideoPath ? $visionService->resolveOrCreateAssetFromPath($this->existingVideoPath) : null);
+
+        if (! $asset && $this->videoFile) {
+            $asset = $visionService->storeUploadedMedia($this->videoFile);
+            $this->selectedMediaAssetId = $asset->id;
+            $this->existingVideoPath = $asset->file_path;
+            $this->loadAvailableVideos();
+        }
+
+        if (! $asset) {
+            $this->statusType = 'error';
+            $this->statusMessage = 'Pilih atau unggah file Video/Gambar terlebih dahulu di Langkah 1 sebelum menjalankan AI Vision.';
+
+            return;
+        }
+
+        try {
+            $summary = $openRouterService->analyzeMediaVisual($asset, null, $this->selectedAiProviderId);
+            $this->aiVisualAnalysis = $summary;
+            $this->loadAvailableVideos();
+
+            $this->statusType = 'success';
+            $this->statusMessage = '👁️ AI Vision berhasil membaca isi visual & teks pada media Anda!';
+        } catch (\Throwable $e) {
+            $this->statusType = 'error';
+            $this->statusMessage = 'Gagal menganalisa visual media: ' . $e->getMessage();
+        }
     }
 
     public function updatedDestinationType(string $value): void
@@ -266,11 +353,30 @@ class AdStudio extends Component
                 $this->customLocations[0]['longitude'] = $textCoord['longitude'];
             }
 
+            $visionService = app(MediaVisionService::class);
+            if ($this->videoFile && empty($this->existingVideoPath)) {
+                $uploadedAsset = $visionService->storeUploadedMedia($this->videoFile);
+                $this->selectedMediaAssetId = $uploadedAsset->id;
+                $this->existingVideoPath = $uploadedAsset->file_path;
+                $this->loadAvailableVideos();
+            }
+
+            $currentAsset = $this->selectedMediaAssetId
+                ? MediaAsset::find($this->selectedMediaAssetId)
+                : ($this->existingVideoPath ? $visionService->resolveOrCreateAssetFromPath($this->existingVideoPath) : null);
+
+            if ($currentAsset && empty($currentAsset->ai_visual_analysis)) {
+                $this->aiVisualAnalysis = $openRouterService->analyzeMediaVisual($currentAsset, $setting, $this->selectedAiProviderId);
+                $currentAsset->refresh();
+            }
+
             $aiResult = $openRouterService->parseAndGenerateDraft(
                 $this->rawUserPrompt,
                 $this->customLocations,
                 $setting,
-                $this->selectedAiProviderId
+                $this->selectedAiProviderId,
+                $this->existingVideoPath ?: null,
+                $currentAsset
             );
 
             $this->title = $aiResult['title'];
@@ -433,11 +539,21 @@ class AdStudio extends Component
             return null;
         }
 
-        if ($this->videoFile) {
-            $storedVideoPath = $this->videoFile->store('ads_videos', 'public');
-        } else {
+        $visionService = app(MediaVisionService::class);
+
+        if ($this->existingVideoPath !== '') {
             $storedVideoPath = $this->existingVideoPath;
+        } elseif ($this->videoFile) {
+            $asset = $visionService->storeUploadedMedia($this->videoFile);
+            $this->selectedMediaAssetId = $asset->id;
+            $storedVideoPath = $asset->file_path;
+        } else {
+            $storedVideoPath = '';
         }
+
+        $linkedAsset = $this->selectedMediaAssetId
+            ? MediaAsset::find($this->selectedMediaAssetId)
+            : $visionService->resolveOrCreateAssetFromPath($storedVideoPath);
 
         $genders = match ($this->genderSelection) {
             'male' => [1],
@@ -522,6 +638,9 @@ class AdStudio extends Component
                 'title' => $draftTitle,
                 'raw_user_prompt' => trim($this->rawUserPrompt),
                 'video_local_path' => $storedVideoPath,
+                'media_asset_id' => $linkedAsset?->id,
+                'media_type' => $linkedAsset?->media_type ?? 'VIDEO',
+                'ai_visual_context' => trim($this->aiVisualAnalysis) ?: ($linkedAsset?->ai_visual_analysis ?? null),
                 'target_platforms' => $draftPlatforms,
                 'meta_account_id' => $mAccId,
                 'tiktok_account_id' => $tAccId,

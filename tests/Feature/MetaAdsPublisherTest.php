@@ -8,8 +8,10 @@ use App\Jobs\PublishTiktokAdJob;
 use App\Models\AdAccount;
 use App\Models\AdDraft;
 use App\Models\AiProvider;
+use App\Models\MediaAsset;
 use App\Models\Setting;
 use App\Services\GoogleAdsService;
+use App\Services\MediaVisionService;
 use App\Services\MetaMarketingService;
 use App\Services\OpenRouterService;
 use App\Services\TelegramBotService;
@@ -333,9 +335,65 @@ class MetaAdsPublisherTest extends TestCase
 
         $this->get('/')->assertOk()->assertSee('Ringkasan Dashboard');
         $this->get('/ads/create')->assertOk()->assertSee('Studio Pembuat Iklan AI');
+        $this->get('/media')->assertOk()->assertSee('Media Storage');
         $this->get('/ads')->assertOk()->assertSee('Manajemen Kampanye');
         $this->get('/ads/' . $draft->id)->assertOk()->assertSee($draft->title);
         $this->get('/settings')->assertOk()->assertSee('Pengaturan Sistem');
+    }
+
+    public function test_media_storage_library_and_multimodal_ai_vision_analysis(): void
+    {
+        Storage::fake('public');
+
+        // 1x1 transparent PNG bytes
+        $pngBytes = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=');
+        Storage::disk('public')->put('ads_media/sample_banner.png', $pngBytes);
+
+        $asset = MediaAsset::create([
+            'title' => 'Banner Promo Ramadhan',
+            'file_name' => 'sample_banner.png',
+            'file_path' => 'ads_media/sample_banner.png',
+            'media_type' => MediaAsset::TYPE_IMAGE,
+            'mime_type' => 'image/png',
+            'file_size' => strlen($pngBytes),
+        ]);
+
+        $visionService = app(MediaVisionService::class);
+        $dataUris = $visionService->buildVisionDataUris(null, $asset);
+
+        $this->assertCount(1, $dataUris);
+        $this->assertStringStartsWith('data:image/png;base64,', $dataUris[0]);
+
+        $setting = Setting::current();
+        $setting->update(['openrouter_api_key' => 'sk-or-vision-test']);
+
+        $capturedPayload = null;
+        Http::fake(function ($request) use (&$capturedPayload) {
+            $capturedPayload = $request->data();
+            return Http::response([
+                'choices' => [
+                    [
+                        'message' => [
+                            'content' => 'Banner hijau bertuliskan Diskon Pasang WiFi 50% selama Ramadhan. Hook yang disarankan: Internet ngebut saat sahur & buka puasa.',
+                        ],
+                    ],
+                ],
+            ], 200);
+        });
+
+        $openRouter = app(OpenRouterService::class);
+        $analysis = $openRouter->analyzeMediaVisual($asset, $setting);
+
+        $this->assertStringContainsString('Diskon Pasang WiFi 50%', $analysis);
+        $this->assertSame($analysis, $asset->fresh()->ai_visual_analysis);
+
+        // Verify multimodal image_url was sent in OpenRouter payload
+        $this->assertNotNull($capturedPayload);
+        $userContent = $capturedPayload['messages'][0]['content'] ?? [];
+        $this->assertIsArray($userContent);
+        $this->assertSame('text', $userContent[0]['type']);
+        $this->assertSame('image_url', $userContent[1]['type']);
+        $this->assertStringStartsWith('data:image/png;base64,', $userContent[1]['image_url']['url']);
     }
 
     public function test_multi_ad_accounts_per_platform_publish_to_distinct_api_accounts(): void

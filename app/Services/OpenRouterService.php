@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\AdDraft;
 use App\Models\AiProvider;
+use App\Models\MediaAsset;
 use App\Models\Setting;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -212,17 +213,33 @@ class OpenRouterService
         string $userPrompt,
         ?array $coordinates = null,
         ?Setting $setting = null,
-        ?int $preferredAiProviderId = null
+        ?int $preferredAiProviderId = null,
+        ?string $mediaRelativePath = null,
+        ?MediaAsset $mediaAsset = null
     ): array {
         $setting = $setting ?? Setting::current();
         $configs = $this->resolveActiveAiConfigs($setting, $preferredAiProviderId);
 
-        $preParsed = $this->extractLocalHints($userPrompt, $coordinates, $setting);
+        $visionService = app(MediaVisionService::class);
+        $resolvedAsset = $mediaAsset ?? ($mediaRelativePath ? $visionService->resolveOrCreateAssetFromPath($mediaRelativePath) : null);
+        $visionUris = $resolvedAsset ? $visionService->buildVisionDataUris(null, $resolvedAsset) : [];
+
+        $enrichedPrompt = $userPrompt;
+        if ($resolvedAsset) {
+            if (! empty($resolvedAsset->notes)) {
+                $enrichedPrompt .= "\n[Catatan Media: {$resolvedAsset->notes}]";
+            }
+            if (! empty($resolvedAsset->ai_visual_analysis)) {
+                $enrichedPrompt .= "\n[Hasil Analisa Visual Media: {$resolvedAsset->ai_visual_analysis}]";
+            }
+        }
+
+        $preParsed = $this->extractLocalHints($enrichedPrompt, $coordinates, $setting);
 
         if (empty($configs)) {
             Log::info('AI Provider API Key kosong, menggunakan Smart Heuristic Omni-Channel Copywriter Engine.');
 
-            return $this->normalizeAiResult($preParsed, $userPrompt, $coordinates, $setting);
+            return $this->normalizeAiResult($preParsed, $enrichedPrompt, $coordinates, $setting);
         }
 
         $systemPrompt = <<<'PROMPT'
@@ -265,7 +282,34 @@ PROMPT;
             $coordContext = "\nKoordinat Lokasi dari Pengguna: " . json_encode($coordinates, JSON_UNESCAPED_UNICODE);
         }
 
-        $userMessage = "Perintah Pengguna:\n\"\"\"\n{$userPrompt}\n\"\"\"{$coordContext}";
+        $visualContextNote = '';
+        if ($resolvedAsset) {
+            $visualContextNote = "\nMedia Terlampir: {$resolvedAsset->title} (Tipe: {$resolvedAsset->media_type})";
+            if (! empty($resolvedAsset->notes)) {
+                $visualContextNote .= "\nCatatan Media: {$resolvedAsset->notes}";
+            }
+            if (! empty($resolvedAsset->ai_visual_analysis)) {
+                $visualContextNote .= "\nAnalisa Visual Media Sebelumnya: {$resolvedAsset->ai_visual_analysis}";
+            }
+        }
+
+        $userMessage = "Perintah Pengguna:\n\"\"\"\n{$userPrompt}\n\"\"\"{$coordContext}{$visualContextNote}";
+
+        $multimodalContent = null;
+        if (! empty($visionUris)) {
+            $multimodalContent = [
+                [
+                    'type' => 'text',
+                    'text' => $userMessage . "\n\n[INSTRUKSI MULTIMODAL VISION]: Perhatikan gambar atau frame cuplikan video iklan terlampir! Baca tulisan/teks yang ada di dalam visual (OCR), amati produk/layanan/suasana yang tampil, dan gunakan detail visual tersebut untuk menyusun Hook, Copywriting Meta, Caption TikTok, serta Headline Google Ads yang sangat relevan!",
+                ],
+            ];
+            foreach ($visionUris as $dataUri) {
+                $multimodalContent[] = [
+                    'type' => 'image_url',
+                    'image_url' => ['url' => $dataUri],
+                ];
+            }
+        }
 
         $jsonSchema = [
             'name' => 'omni_ads_draft_schema',
@@ -343,11 +387,13 @@ PROMPT;
 
         foreach ($configs as $cfg) {
             try {
+                $userMsgContent = $multimodalContent ?? $userMessage;
+
                 $payload = [
                     'model' => $cfg['model'],
                     'messages' => [
                         ['role' => 'system', 'content' => $systemPrompt],
-                        ['role' => 'user', 'content' => $userMessage],
+                        ['role' => 'user', 'content' => $userMsgContent],
                     ],
                     'temperature' => 0.5,
                     'response_format' => [
@@ -375,6 +421,12 @@ PROMPT;
                     $response = Http::withHeaders($headers)->timeout(60)->post($cfg['endpoint'], $payload);
                 }
 
+                // Fallback to text-only if the selected model does not accept multimodal image_url array
+                if (! $response->successful() && $multimodalContent !== null) {
+                    $payload['messages'][1]['content'] = $userMessage;
+                    $response = Http::withHeaders($headers)->timeout(60)->post($cfg['endpoint'], $payload);
+                }
+
                 if (! $response->successful()) {
                     $errorMsg = $response->json('error.message') ?? $response->body();
                     throw new RuntimeException($cfg['provider'] . ' API Error (' . $response->status() . '): ' . $errorMsg);
@@ -395,6 +447,90 @@ PROMPT;
         }
 
         throw $lastException ?? new RuntimeException('Gagal memproses permintaan ke seluruh AI Provider.');
+    }
+
+    /**
+     * Analyze a MediaAsset (Video keyframes or Image) using Multimodal AI Vision to read on-screen text (OCR),
+     * visual scenes, product features, and recommended marketing angles.
+     */
+    public function analyzeMediaVisual(
+        MediaAsset $asset,
+        ?Setting $setting = null,
+        ?int $preferredAiProviderId = null
+    ): string {
+        $setting = $setting ?? Setting::current();
+        $visionService = app(MediaVisionService::class);
+        $visionUris = $visionService->buildVisionDataUris(null, $asset);
+        $asset->refresh();
+
+        $configs = $this->resolveActiveAiConfigs($setting, $preferredAiProviderId);
+
+        if (empty($configs) || empty($visionUris)) {
+            $dim = ($asset->width && $asset->height) ? "{$asset->width}x{$asset->height}px" : 'Standar';
+            $dur = $asset->duration_seconds ? " • Durasi: {$asset->duration_seconds} detik" : '';
+            $frameCount = count($asset->extracted_frames ?? []);
+            $frameInfo = $asset->isVideo() ? " ({$frameCount} keyframe visual diekstrak via FFmpeg)" : ' (Aset Gambar Resolusi Penuh)';
+
+            $summary = "👁️ [Analisa Visual Otomatis — {$asset->media_type}]: Judul \"{$asset->title}\", Resolusi {$dim}{$dur}{$frameInfo}. "
+                . ($asset->notes ? "Catatan konteks: {$asset->notes}. " : '')
+                . 'Visual siap digunakan sebagai referensi Hook & Copywriting iklan Omni-Channel.';
+
+            $asset->update(['ai_visual_analysis' => $summary]);
+
+            return $summary;
+        }
+
+        $contentBlocks = [
+            [
+                'type' => 'text',
+                'text' => "Anda adalah AI Visual Media Analyst & Direct-Response Creative Director.\n"
+                    . "Amati gambar atau rangkaian frame cuplikan video iklan ini ({$asset->title}), lalu tuliskan analisa singkat (3-5 kalimat padat dalam Bahasa Indonesia) yang mencakup:\n"
+                    . "1. Teks/tulisan/angka promo yang terlihat di layar (OCR).\n"
+                    . "2. Objek, produk, layanan, atau aktivitas utama yang tampil di visual.\n"
+                    . "3. Rekomendasi Hook kalimat pertama & sudut pandang (angle) iklan yang paling menjual berdasarkan visual tersebut.",
+            ],
+        ];
+
+        foreach ($visionUris as $uri) {
+            $contentBlocks[] = [
+                'type' => 'image_url',
+                'image_url' => ['url' => $uri],
+            ];
+        }
+
+        foreach ($configs as $cfg) {
+            try {
+                $response = Http::withHeaders([
+                    'Authorization' => 'Bearer ' . $cfg['api_key'],
+                    'HTTP-Referer' => config('app.url', 'http://localhost:8000'),
+                    'X-Title' => config('app.name', 'MetaAds AI Publisher'),
+                    'Content-Type' => 'application/json',
+                ])->timeout(60)->post($cfg['endpoint'], [
+                    'model' => $cfg['model'],
+                    'messages' => [
+                        ['role' => 'user', 'content' => $contentBlocks],
+                    ],
+                    'temperature' => 0.4,
+                    'max_tokens' => 350,
+                ]);
+
+                if ($response->successful()) {
+                    $text = trim((string) ($response->json('choices.0.message.content') ?? ''));
+                    if ($text !== '') {
+                        $asset->update(['ai_visual_analysis' => $text]);
+
+                        return $text;
+                    }
+                }
+            } catch (\Throwable $e) {
+                Log::warning("Gagal analisa visual via {$cfg['provider']}: " . $e->getMessage());
+            }
+        }
+
+        $fallbackSummary = "👁️ Visual {$asset->media_type} \"{$asset->title}\" (" . count($visionUris) . ' frame terdeteksi) siap diintegrasikan ke prompt AI.';
+        $asset->update(['ai_visual_analysis' => $fallbackSummary]);
+
+        return $fallbackSummary;
     }
 
     /**
