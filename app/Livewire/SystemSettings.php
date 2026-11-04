@@ -5,11 +5,13 @@ namespace App\Livewire;
 use App\Models\AdAccount;
 use App\Models\AiProvider;
 use App\Models\Setting;
+use App\Services\GitDeployService;
 use App\Services\GoogleAdsService;
 use App\Services\MetaMarketingService;
 use App\Services\OpenRouterService;
 use App\Services\TelegramBotService;
 use App\Services\TikTokMarketingService;
+use Illuminate\Support\Str;
 use Livewire\Attributes\Layout;
 use Livewire\Attributes\Title;
 use Livewire\Component;
@@ -51,6 +53,11 @@ class SystemSettings extends Component
     public string $telegramBotToken = '';
     public string $allowedTelegramChatIdsText = '';
     public string $webhookDomainUrl = '';
+
+    // Git Auto-Deploy Settings
+    public string $deployWebhookSecret = '';
+    public string $deployBranch = 'main';
+    public string $deployWebhookUrl = '';
 
     public float $defaultLatitude = -1.610123;
     public float $defaultLongitude = 103.613120;
@@ -132,7 +139,17 @@ class SystemSettings extends Component
         $this->defaultLatitude = (float) ($setting->default_latitude ?: -1.610123);
         $this->defaultLongitude = (float) ($setting->default_longitude ?: 103.613120);
 
-        $this->webhookDomainUrl = rtrim(config('app.url', request()->getSchemeAndHttpHost()), '/') . '/api/telegram/webhook';
+        if (empty($setting->deploy_webhook_secret)) {
+            $setting->update(['deploy_webhook_secret' => 'whsec_' . Str::random(32)]);
+            $setting->refresh();
+        }
+
+        $this->deployWebhookSecret = (string) ($setting->deploy_webhook_secret ?? '');
+        $this->deployBranch = (string) ($setting->deploy_branch ?: 'main');
+
+        $baseUrl = rtrim(config('app.url', request()->getSchemeAndHttpHost()), '/');
+        $this->webhookDomainUrl = $baseUrl . '/api/telegram/webhook';
+        $this->deployWebhookUrl = $baseUrl . '/api/deploy/webhook';
     }
 
     public function updatedAiProfileProvider(string $provider): void
@@ -194,6 +211,8 @@ class SystemSettings extends Component
             'allowed_telegram_chat_ids' => $chatIds,
             'default_latitude' => round((float) $this->defaultLatitude, 6),
             'default_longitude' => round((float) $this->defaultLongitude, 6),
+            'deploy_webhook_secret' => trim($this->deployWebhookSecret) ?: ('whsec_' . Str::random(32)),
+            'deploy_branch' => trim($this->deployBranch) ?: 'main',
         ]);
 
         $setting->refresh();
@@ -606,9 +625,32 @@ class SystemSettings extends Component
         $this->defaultLongitude = round($lng, 6);
     }
 
-    public function render()
+    public function regenerateDeploySecret(): void
+    {
+        $newSecret = 'whsec_' . Str::random(32);
+        $this->deployWebhookSecret = $newSecret;
+
+        $setting = Setting::current();
+        $setting->update(['deploy_webhook_secret' => $newSecret]);
+
+        $this->feedbackType = 'success';
+        $this->feedbackMessage = '🔑 Deploy Webhook Secret baru berhasil dibuat dan disimpan!';
+    }
+
+    public function triggerManualGitDeploy(GitDeployService $deployService): void
+    {
+        $setting = $this->saveSettings();
+        $res = $deployService->runAutoDeploy($setting, 'Tombol Manual Dashboard');
+
+        $this->feedbackType = $res['ok'] ? 'success' : 'error';
+        $this->feedbackMessage = ($res['ok'] ? '🚀 ' : '❌ ') . $res['message'];
+    }
+
+    public function render(GitDeployService $deployService)
     {
         return view('livewire.system-settings', [
+            'setting' => Setting::current(),
+            'gitStatus' => $deployService->getCurrentGitStatus(),
             'adAccounts' => AdAccount::query()
                 ->orderBy('provider')
                 ->orderByDesc('is_default')

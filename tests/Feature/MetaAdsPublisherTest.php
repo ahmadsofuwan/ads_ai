@@ -596,4 +596,46 @@ class MetaAdsPublisherTest extends TestCase
         $this->assertSame('video/mp4', $convertedVideo->mime_type);
         Storage::disk('public')->assertExists($convertedVideo->file_path);
     }
+
+    public function test_github_auto_deploy_webhook_verifies_hmac_signature_and_runs_deploy(): void
+    {
+        $setting = Setting::current();
+        $setting->update([
+            'deploy_webhook_secret' => 'whsec_test_secret_123',
+            'deploy_branch' => 'main',
+        ]);
+
+        $payload = json_encode([
+            'ref' => 'refs/heads/main',
+            'pusher' => ['name' => 'ahmadsofuwan'],
+        ]);
+
+        // 1. Reject invalid signature
+        $this->postJson('/api/deploy/webhook', json_decode($payload, true), [
+            'X-Hub-Signature-256' => 'sha256=invalidsignature',
+        ])->assertStatus(403);
+
+        // 2. Accept valid HMAC SHA-256 signature and execute deploy pipeline
+        $validSignature = 'sha256=' . hash_hmac('sha256', $payload, 'whsec_test_secret_123');
+        $response = $this->call(
+            'POST',
+            '/api/deploy/webhook',
+            [],
+            [],
+            [],
+            [
+                'CONTENT_TYPE' => 'application/json',
+                'HTTP_X_GITHUB_EVENT' => 'push',
+                'HTTP_X_HUB_SIGNATURE_256' => $validSignature,
+            ],
+            $payload
+        );
+
+        $response->assertOk()->assertJson(['ok' => true, 'branch' => 'main']);
+
+        $setting->refresh();
+        $this->assertSame('SUCCESS', $setting->last_deploy_status);
+        $this->assertNotNull($setting->last_deployed_at);
+        $this->assertStringContainsString('Memulai Auto-Deploy', (string) $setting->last_deploy_log);
+    }
 }

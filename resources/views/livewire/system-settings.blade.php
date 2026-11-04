@@ -786,6 +786,83 @@
         </div>
     </div>
 
+    <!-- 7. Git Auto-Deploy & GitHub Webhook CI/CD Section -->
+    <div class="rounded-2xl bg-white dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 p-6 shadow-sm space-y-5">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200 dark:border-zinc-800 pb-4">
+            <div>
+                <div class="inline-flex items-center gap-2 px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 text-[11px] font-bold mb-1">
+                    <span>🚀 GIT AUTO-DEPLOY &amp; GITHUB WEBHOOK CI/CD</span>
+                </div>
+                <h2 class="text-base font-bold text-slate-900 dark:text-white">
+                    7. Auto-Deploy Otomatis dari GitHub (<code class="text-xs font-mono text-indigo-500">{{ $gitStatus['remote_url'] ?? 'https://github.com/ahmadsofuwan/ads_ai.git' }}</code>)
+                </h2>
+                <p class="text-xs text-slate-500 dark:text-zinc-400">
+                    Setiap kali Anda melakukan <code class="font-mono">git push origin {{ $deployBranch }}</code> ke GitHub, server otomatis menarik commit terbaru, menjalankan migrasi SQLite, membersihkan cache, dan me-restart queue worker.
+                </p>
+            </div>
+
+            <button type="button"
+                    wire:click="triggerManualGitDeploy"
+                    wire:loading.attr="disabled"
+                    class="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-md shadow-emerald-600/20 whitespace-nowrap transition">
+                <span wire:loading.remove wire:target="triggerManualGitDeploy">🚀 Pull &amp; Deploy dari GitHub Sekarang</span>
+                <span wire:loading wire:target="triggerManualGitDeploy">⏳ Menjalankan Git Pull &amp; Migrate...</span>
+            </button>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+            <div class="lg:col-span-6 space-y-4">
+                <div class="p-4 rounded-xl bg-slate-50 dark:bg-zinc-950/60 border border-slate-200 dark:border-zinc-800 space-y-2">
+                    <div class="text-xs font-bold text-slate-800 dark:text-zinc-200">📌 Status Git Lokal Saat Ini:</div>
+                    <div class="text-xs font-mono text-slate-600 dark:text-zinc-300 space-y-1">
+                        <div>Branch Aktif: <span class="font-bold text-emerald-600 dark:text-emerald-400">{{ $gitStatus['branch'] ?? 'main' }}</span></div>
+                        <div>Commit HEAD: <span class="font-bold text-indigo-600 dark:text-indigo-400">{{ $gitStatus['commit_short'] ?? '-' }}</span> — {{ $gitStatus['commit_message'] ?? '-' }}</div>
+                        @if (!empty($setting?->last_deployed_at))
+                            <div>Deploy Terakhir: <span class="font-semibold">{{ $setting->last_deployed_at->format('d M Y H:i:s') }}</span> ({{ $setting->last_deploy_status }})</div>
+                        @endif
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                        <label class="block text-xs font-semibold text-slate-700 dark:text-zinc-300 mb-1">Target Branch Git</label>
+                        <input type="text" wire:model="deployBranch" placeholder="main"
+                               class="w-full rounded-xl border-slate-300 dark:border-zinc-700 bg-slate-50 dark:bg-zinc-800 font-mono text-xs" />
+                    </div>
+                    <div class="sm:col-span-2">
+                        <label class="block text-xs font-semibold text-slate-700 dark:text-zinc-300 mb-1">Payload URL (GitHub Settings → Webhooks)</label>
+                        <input type="text" readonly value="{{ $deployWebhookUrl }}"
+                               class="w-full rounded-xl border-slate-300 dark:border-zinc-700 bg-slate-100 dark:bg-zinc-800/80 font-mono text-xs text-slate-700 dark:text-zinc-300" />
+                    </div>
+                </div>
+
+                <div>
+                    <div class="flex items-center justify-between mb-1">
+                        <label class="block text-xs font-semibold text-slate-700 dark:text-zinc-300">
+                            Webhook Secret Token (<code class="text-indigo-500">X-Hub-Signature-256</code> / <code class="text-indigo-500">X-Deploy-Token</code>)
+                        </label>
+                        <button type="button" wire:click="regenerateDeploySecret"
+                                class="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">
+                            🔄 Buat Secret Baru
+                        </button>
+                    </div>
+                    <input type="text" wire:model="deployWebhookSecret"
+                           class="w-full rounded-xl border-slate-300 dark:border-zinc-700 bg-slate-50 dark:bg-zinc-800 font-mono text-xs" />
+                    <p class="mt-1 text-[11px] text-slate-500 dark:text-zinc-400">
+                        Pasang di GitHub: <strong>Settings → Webhooks → Add webhook</strong>, isi Payload URL di atas, Content type: <code class="font-mono">application/json</code>, dan masukkan Secret di atas.
+                    </p>
+                </div>
+            </div>
+
+            <div class="lg:col-span-6 space-y-2">
+                <div class="text-xs font-bold text-slate-800 dark:text-zinc-200">
+                    🖥️ Output Log Auto-Deploy Terakhir:
+                </div>
+                <pre class="p-4 rounded-xl bg-slate-950 text-emerald-400 font-mono text-[11px] leading-relaxed overflow-x-auto max-h-60 border border-slate-800">{{ $setting?->last_deploy_log ?: "Belum ada riwayat eksekusi Auto-Deploy.\nKlik tombol '🚀 Pull & Deploy dari GitHub Sekarang' atau lakukan git push ke GitHub." }}</pre>
+            </div>
+        </div>
+    </div>
+
     <script>
         document.addEventListener('livewire:initialized', () => {
             const mapEl = document.getElementById('settings-leaflet-map');

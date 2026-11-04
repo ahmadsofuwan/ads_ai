@@ -35,12 +35,19 @@ class Setting extends Model
         'allowed_telegram_chat_ids',
         'default_latitude',
         'default_longitude',
+        'deploy_webhook_secret',
+        'deploy_branch',
+        'last_deployed_at',
+        'last_deploy_commit',
+        'last_deploy_status',
+        'last_deploy_log',
     ];
 
     protected $casts = [
         'allowed_telegram_chat_ids' => 'array',
         'default_latitude' => 'float',
         'default_longitude' => 'float',
+        'last_deployed_at' => 'datetime',
     ];
 
     /**
